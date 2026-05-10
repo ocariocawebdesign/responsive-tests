@@ -1,6 +1,7 @@
 import asyncio
 import json
 import os
+import re
 import uuid
 from datetime import datetime
 from pathlib import Path
@@ -13,105 +14,425 @@ from PIL import Image
 import requests
 from bs4 import BeautifulSoup
 
+class ResponsiveGuideTool:
+    name: str = "responsive_guide"
+    description: str = "Parse responsive-guide.md and extract breakpoints and rules"
+
+    def _guide_path(self) -> Path:
+        return Path(__file__).resolve().parents[2] / "responsive-guide.md"
+
+    def load_and_parse(self) -> Dict[str, Any]:
+        guide_path = self._guide_path()
+        if not guide_path.exists():
+            raise FileNotFoundError(f"Arquivo não encontrado: {guide_path}")
+
+        content = guide_path.read_text(encoding="utf-8", errors="ignore")
+
+        version = None
+        version_match = re.search(r"\*\*Versão:\*\*\s*([0-9]+(?:\.[0-9]+)*)", content)
+        if version_match:
+            version = version_match.group(1).strip()
+
+        widths = []
+        for m in re.finditer(r"Layout funciona em\s+(\d+)px", content):
+            widths.append(int(m.group(1)))
+        wide_match = re.search(r"Layout funciona em\s+(\d+)px\+", content)
+        wide_width = int(wide_match.group(1)) if wide_match else None
+
+        widths = sorted(set(widths))
+        mobile_width = 375 if 375 in widths else (widths[0] if widths else 375)
+        tablet_width = 768 if 768 in widths else 768
+        desktop_width = 1024 if 1024 in widths else 1024
+        large_width = wide_width or (1440 if 1440 in widths else 1440)
+
+        breakpoints = [
+            {"id": "mobile", "label": "Mobile", "width": mobile_width, "height": 667, "device_scale_factor": 2},
+            {"id": "tablet", "label": "Tablet", "width": tablet_width, "height": 1024, "device_scale_factor": 2},
+            {"id": "desktop", "label": "Desktop", "width": desktop_width, "height": 900, "device_scale_factor": 1},
+            {"id": "large-desktop", "label": "Large Desktop", "width": large_width, "height": 900, "device_scale_factor": 1},
+        ]
+
+        rules = {
+            "min_font_px": 16,
+            "touch_target_min_px": 44,
+            "require_viewport_meta": True,
+            "disallow_user_scalable_no": True,
+            "disallow_minimum_scale": True,
+            "disallow_maximum_scale": True,
+            "no_horizontal_scroll": True,
+        }
+
+        def _extract_section(start_pattern: str, end_pattern: str, max_len: int = 5000) -> Optional[str]:
+            start = re.search(start_pattern, content)
+            if not start:
+                return None
+            end = re.search(end_pattern, content[start.end():])
+            raw = content[start.end(): start.end() + (end.start() if end else len(content))]
+            raw = raw.strip()
+            return raw[:max_len]
+
+        media_queries_excerpt = _extract_section(r"## 3\.\s*MEDIA QUERIES[\s\S]*?\n", r"\n---\n", max_len=6000)
+        layout_checklist_excerpt = _extract_section(r"### 10\.2 Layout[\s\S]*?\n", r"### 10\.3", max_len=2500)
+        components_excerpt = _extract_section(r"## 9\.\s*TAILWIND CSS[\s\S]*?\n", r"\n---\n", max_len=6000)
+
+        return {
+            "version": version,
+            "path": str(guide_path),
+            "breakpoints": breakpoints,
+            "rules": rules,
+            "excerpts": {
+                "media_queries": media_queries_excerpt,
+                "layout_guidelines": layout_checklist_excerpt,
+                "component_patterns": components_excerpt,
+            },
+        }
+
 class ScreenshotCaptureTool:
     """Tool for capturing screenshots of websites"""
     
     name: str = "capture_screenshots"
     description: str = "Capture screenshots of a website in different screen sizes"
     
-    async def run(self, url: str, analysis_id: str) -> List[Dict[str, Any]]:
+    async def run(
+        self,
+        url: str,
+        analysis_id: str,
+        breakpoints: Optional[List[Dict[str, Any]]] = None,
+        guide_rules: Optional[Dict[str, Any]] = None
+    ) -> List[Dict[str, Any]]:
         """Capture screenshots in multiple device sizes"""
         try:
             print(f"Capturing screenshots for {url}")
             
-            # Device configurations
-            devices = [
-                {
-                    "name": "mobile",
-                    "width": 375,
-                    "height": 667,
-                    "device_scale_factor": 2,
-                    "user_agent": "Mozilla/5.0 (iPhone; CPU iPhone OS 14_0 like Mac OS X) AppleWebKit/605.1.15"
-                },
-                {
-                    "name": "tablet", 
-                    "width": 768,
-                    "height": 1024,
-                    "device_scale_factor": 2,
-                    "user_agent": "Mozilla/5.0 (iPad; CPU OS 14_0 like Mac OS X) AppleWebKit/605.1.15"
-                },
-                {
-                    "name": "desktop",
-                    "width": 1920,
-                    "height": 1080,
-                    "device_scale_factor": 1,
-                    "user_agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36"
-                },
-                {
-                    "name": "4k",
-                    "width": 3840,
-                    "height": 2160,
-                    "device_scale_factor": 1,
-                    "user_agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36"
-                }
+            devices = breakpoints or [
+                {"id": "mobile", "label": "Mobile", "width": 375, "height": 667, "device_scale_factor": 2},
+                {"id": "tablet", "label": "Tablet", "width": 768, "height": 1024, "device_scale_factor": 2},
+                {"id": "desktop", "label": "Desktop", "width": 1024, "height": 900, "device_scale_factor": 1},
+                {"id": "large-desktop", "label": "Large Desktop", "width": 1440, "height": 900, "device_scale_factor": 1},
             ]
+            rules = guide_rules or {"min_font_px": 16, "touch_target_min_px": 44}
             
             screenshots = []
+            screenshots_dir = Path(__file__).resolve().parents[2] / "screenshots"
+            screenshots_dir.mkdir(exist_ok=True)
+
+            def _ua(device_id: str) -> str:
+                if device_id == "mobile":
+                    return "Mozilla/5.0 (iPhone; CPU iPhone OS 14_0 like Mac OS X) AppleWebKit/605.1.15"
+                if device_id == "tablet":
+                    return "Mozilla/5.0 (iPad; CPU OS 14_0 like Mac OS X) AppleWebKit/605.1.15"
+                return "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36"
+
+            async def _evaluate_compliance(page) -> List[Dict[str, Any]]:
+                metrics = await page.evaluate(
+                    """() => {
+                      const meta = document.querySelector('meta[name=\"viewport\"]');
+                      const viewportContent = meta ? (meta.getAttribute('content') || '') : null;
+                      const doc = document.documentElement;
+                      const overflowX = doc.scrollWidth > window.innerWidth + 1;
+                      const bodyFont = window.getComputedStyle(document.body).fontSize || '';
+                      const bodyFontPx = parseFloat(bodyFont) || null;
+
+                      const targets = Array.from(document.querySelectorAll('a,button,input,select,textarea,[role=\"button\"]'))
+                        .filter(el => {
+                          const style = window.getComputedStyle(el);
+                          const rect = el.getBoundingClientRect();
+                          return rect.width > 0 && rect.height > 0 && style.visibility !== 'hidden' && style.display !== 'none';
+                        })
+                        .map(el => el.getBoundingClientRect())
+                        .filter(r => r.width < 44 || r.height < 44);
+
+                      const media = Array.from(document.querySelectorAll('img,video,embed,object,iframe'))
+                        .filter(el => {
+                          const rect = el.getBoundingClientRect();
+                          return rect.width > window.innerWidth + 1;
+                        });
+
+                      return {
+                        viewportContent,
+                        overflowX,
+                        bodyFontPx,
+                        smallTargetCount: targets.length,
+                        oversizedMediaCount: media.length
+                      };
+                    }"""
+                )
+
+                violations: List[Dict[str, Any]] = []
+                if rules.get("require_viewport_meta", True):
+                    if not metrics.get("viewportContent"):
+                        violations.append({
+                            "id": "viewport_meta_missing",
+                            "title": "Meta viewport ausente",
+                            "description": "A página não possui <meta name=\"viewport\">, o que pode quebrar media queries em mobile.",
+                            "guide_ref": "responsive-guide.md §2.1 / §10.1"
+                        })
+                    else:
+                        content = str(metrics.get("viewportContent") or "")
+                        lc = content.lower()
+                        if "width=device-width" not in lc or "initial-scale=1" not in lc and "initial-scale=1.0" not in lc:
+                            violations.append({
+                                "id": "viewport_meta_invalid",
+                                "title": "Meta viewport inválida",
+                                "description": f"Conteúdo atual: {content}. Recomendado: width=device-width, initial-scale=1.",
+                                "guide_ref": "responsive-guide.md §2.1 / §10.1"
+                            })
+                        if rules.get("disallow_user_scalable_no", True) and "user-scalable=no" in lc:
+                            violations.append({
+                                "id": "viewport_user_scalable_no",
+                                "title": "Zoom desabilitado (user-scalable=no)",
+                                "description": "Bloquear zoom viola acessibilidade e boas práticas. Remova user-scalable=no.",
+                                "guide_ref": "responsive-guide.md §2.1 / §10.7 / §11"
+                            })
+                        if rules.get("disallow_minimum_scale", True) and "minimum-scale" in lc:
+                            violations.append({
+                                "id": "viewport_minimum_scale",
+                                "title": "minimum-scale presente",
+                                "description": "Evite minimum-scale; pode prejudicar acessibilidade.",
+                                "guide_ref": "responsive-guide.md §2.1"
+                            })
+                        if rules.get("disallow_maximum_scale", True) and "maximum-scale" in lc:
+                            violations.append({
+                                "id": "viewport_maximum_scale",
+                                "title": "maximum-scale presente",
+                                "description": "Evite maximum-scale; pode prejudicar acessibilidade.",
+                                "guide_ref": "responsive-guide.md §2.1"
+                            })
+
+                if rules.get("no_horizontal_scroll", True) and metrics.get("overflowX"):
+                    violations.append({
+                        "id": "horizontal_scroll",
+                        "title": "Scroll horizontal indesejado",
+                        "description": "O conteúdo excede a largura do viewport (scrollWidth > innerWidth).",
+                        "guide_ref": "responsive-guide.md §10.2 / §11"
+                    })
+
+                min_font = rules.get("min_font_px", 16)
+                if metrics.get("bodyFontPx") and metrics.get("bodyFontPx") < float(min_font):
+                    violations.append({
+                        "id": "min_font_size",
+                        "title": "Fonte do corpo abaixo do mínimo",
+                        "description": f"Fonte do body = {metrics.get('bodyFontPx')}px (mínimo recomendado: {min_font}px).",
+                        "guide_ref": "responsive-guide.md §10.3 / §11"
+                    })
+
+                if metrics.get("smallTargetCount", 0) > 0:
+                    violations.append({
+                        "id": "touch_targets_small",
+                        "title": "Alvos de toque pequenos",
+                        "description": f"Foram encontrados {metrics.get('smallTargetCount')} elementos interativos com tamanho < 44x44px.",
+                        "guide_ref": "responsive-guide.md §10.5"
+                    })
+
+                if metrics.get("oversizedMediaCount", 0) > 0:
+                    violations.append({
+                        "id": "oversized_media",
+                        "title": "Mídia maior que o viewport",
+                        "description": f"Foram encontrados {metrics.get('oversizedMediaCount')} elementos de mídia com largura maior que o viewport.",
+                        "guide_ref": "responsive-guide.md §6 / §10.4"
+                    })
+
+                return violations
             
             async with async_playwright() as p:
-                browser = await p.chromium.launch(headless=True)
+                browser = None
+                for launcher_name in ("chromium", "firefox", "webkit"):
+                    try:
+                        launcher = getattr(p, launcher_name)
+                        browser = await launcher.launch(headless=True)
+                        break
+                    except Exception as e:
+                        print(f"{launcher_name} launch failed: {e}")
+                        if launcher_name == "chromium":
+                            os.system("python -m playwright install chromium")
+                        elif launcher_name == "firefox":
+                            os.system("python -m playwright install firefox")
+                        elif launcher_name == "webkit":
+                            os.system("python -m playwright install webkit")
+                        try:
+                            launcher = getattr(p, launcher_name)
+                            browser = await launcher.launch(headless=True)
+                            break
+                        except Exception as e2:
+                            print(f"{launcher_name} launch retry failed: {e2}")
+                            continue
                 
+                if not browser:
+                    print("No browser could be launched; generating placeholder screenshots.")
+                    timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+                    for device in devices:
+                        filename = f"{analysis_id}_{device['id']}_{timestamp}.png"
+                        full_page_filename = f"{analysis_id}_{device['id']}_full_{timestamp}.png"
+                        img = Image.new("RGB", (int(device["width"]), int(device["height"])), color=(245, 245, 245))
+                        timestamp_label = datetime.now().strftime("%d/%m/%Y %H:%M")
+                        try:
+                            from PIL import ImageDraw
+                            draw = ImageDraw.Draw(img)
+                            draw.multiline_text((20, 20), f"{device.get('label', device['id'])}\n{device['width']}x{device['height']}\n{timestamp_label}\n(placeholder)", fill=(60, 60, 60))
+                        except Exception:
+                            pass
+                        img.save(screenshots_dir / filename)
+                        img.save(screenshots_dir / full_page_filename)
+                        screenshots.append({
+                            "id": str(uuid.uuid4()),
+                            "device": device["id"],
+                            "resolution": f"{device['width']}x{device['height']}",
+                            "url": f"/screenshots/{filename}",
+                            "full_page_url": f"/screenshots/{full_page_filename}",
+                            "compliant": False,
+                            "violations": [{
+                                "id": "screenshot_capture_unavailable",
+                                "title": "Captura indisponível no ambiente",
+                                "description": "Não foi possível iniciar um navegador do Playwright; foram geradas imagens placeholder.",
+                                "guide_ref": "responsive-guide.md §10.2"
+                            }]
+                        })
+                    return screenshots
+
                 for device in devices:
                     try:
                         context = await browser.new_context(
-                            viewport={"width": device["width"], "height": device["height"]},
-                            device_scale_factor=device["device_scale_factor"],
-                            user_agent=device["user_agent"]
+                            viewport={"width": int(device["width"]), "height": int(device["height"])},
+                            device_scale_factor=int(device.get("device_scale_factor") or 1),
+                            user_agent=_ua(device.get("id") or device.get("name") or "")
                         )
                         
                         page = await context.new_page()
                         
                         # Navigate to URL
-                        await page.goto(url, wait_until="networkidle", timeout=30000)
+                        try:
+                            await page.goto(url, wait_until="domcontentloaded", timeout=30000)
+                        except Exception:
+                            await page.goto(url, wait_until="load", timeout=30000)
                         
                         # Wait a bit for any dynamic content
                         await asyncio.sleep(2)
                         
+                        violations = await _evaluate_compliance(page)
+                        compliant = len(violations) == 0
+
                         # Generate filenames
                         timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
-                        filename = f"{analysis_id}_{device['name']}_{timestamp}.png"
-                        full_page_filename = f"{analysis_id}_{device['name']}_full_{timestamp}.png"
+                        device_id = device.get("id") or device.get("name")
+                        filename = f"{analysis_id}_{device_id}_{timestamp}.png"
+                        full_page_filename = f"{analysis_id}_{device_id}_full_{timestamp}.png"
                         
                         # Take viewport screenshot
-                        screenshot_path = Path("screenshots") / filename
+                        screenshot_path = screenshots_dir / filename
                         await page.screenshot(path=str(screenshot_path), full_page=False)
                         
                         # Take full page screenshot
-                        full_page_path = Path("screenshots") / full_page_filename
+                        full_page_path = screenshots_dir / full_page_filename
                         await page.screenshot(path=str(full_page_path), full_page=True)
                         
                         screenshots.append({
                             "id": str(uuid.uuid4()),
-                            "device": device["name"],
+                            "device": device_id,
                             "resolution": f"{device['width']}x{device['height']}",
                             "url": f"/screenshots/{filename}",
-                            "full_page_url": f"/screenshots/{full_page_filename}"
+                            "full_page_url": f"/screenshots/{full_page_filename}",
+                            "compliant": compliant,
+                            "violations": violations
                         })
                         
                         await context.close()
                         
                     except Exception as e:
-                        print(f"Error capturing {device['name']} screenshot: {e}")
+                        print(f"Error capturing {(device.get('id') or device.get('name') or 'breakpoint')} screenshot: {e}")
                         continue
                 
                 await browser.close()
             
             print(f"Captured {len(screenshots)} screenshots")
+            if not screenshots:
+                try:
+                    print("No screenshots captured, generating placeholders")
+                    from PIL import Image, ImageDraw
+                    timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+                    for device in devices:
+                        device_id = device.get("id") or device.get("name") or "breakpoint"
+                        w = int(device.get("width") or 0) or 800
+                        h = int(device.get("height") or 0) or 600
+                        filename = f"{analysis_id}_{device_id}_{timestamp}.png"
+                        full_page_filename = f"{analysis_id}_{device_id}_full_{timestamp}.png"
+                        img = Image.new('RGB', (w, h), color=(245, 245, 245))
+                        draw = ImageDraw.Draw(img)
+                        text = f"{str(device_id).upper()}\n{w}x{h}\n(placeholder)"
+                        draw.multiline_text((20, 20), text, fill=(60,60,60))
+                        img.save(screenshots_dir / filename)
+                        img.save(screenshots_dir / full_page_filename)
+                        screenshots.append({
+                            "id": str(uuid.uuid4()),
+                            "device": device_id,
+                            "resolution": f"{w}x{h}",
+                            "url": f"/screenshots/{filename}",
+                            "full_page_url": f"/screenshots/{full_page_filename}",
+                            "compliant": False,
+                            "violations": [{
+                                "id": "screenshot_placeholder",
+                                "title": "Screenshot placeholder",
+                                "description": "A captura falhou para este breakpoint e uma imagem placeholder foi gerada.",
+                                "guide_ref": "responsive-guide.md §10.2"
+                            }]
+                        })
+                    print(f"Generated {len(screenshots)} placeholder screenshots")
+                except Exception as e:
+                    print(f"Error generating placeholders: {e}")
             return screenshots
             
         except Exception as e:
             print(f"Error capturing screenshots: {e}")
-            raise
+            try:
+                screenshots: List[Dict[str, Any]] = []
+                screenshots_dir = Path(__file__).resolve().parents[2] / "screenshots"
+                screenshots_dir.mkdir(exist_ok=True)
+                devices = [
+                    {"id": "mobile", "label": "Mobile", "width": 375, "height": 667},
+                    {"id": "tablet", "label": "Tablet", "width": 768, "height": 1024},
+                    {"id": "desktop", "label": "Desktop", "width": 1024, "height": 900},
+                    {"id": "large-desktop", "label": "Large Desktop", "width": 1440, "height": 900},
+                ]
+                timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+                err = str(e)
+                if len(err) > 160:
+                    err = err[:160] + "..."
+                for device in devices:
+                    device_id = device.get("id") or "breakpoint"
+                    w = int(device.get("width") or 0) or 800
+                    h = int(device.get("height") or 0) or 600
+                    filename = f"{analysis_id}_{device_id}_{timestamp}.png"
+                    full_page_filename = f"{analysis_id}_{device_id}_full_{timestamp}.png"
+                    img = Image.new("RGB", (w, h), color=(245, 245, 245))
+                    try:
+                        from PIL import ImageDraw
+                        draw = ImageDraw.Draw(img)
+                        draw.multiline_text(
+                            (20, 20),
+                            f"{device.get('label', device_id)}\n{w}x{h}\n(placeholder)\n{err}",
+                            fill=(60, 60, 60),
+                        )
+                    except Exception:
+                        pass
+                    img.save(screenshots_dir / filename)
+                    img.save(screenshots_dir / full_page_filename)
+                    screenshots.append({
+                        "id": str(uuid.uuid4()),
+                        "device": device_id,
+                        "resolution": f"{w}x{h}",
+                        "url": f"/screenshots/{filename}",
+                        "full_page_url": f"/screenshots/{full_page_filename}",
+                        "compliant": False,
+                        "violations": [{
+                            "id": "screenshot_capture_exception",
+                            "title": "Falha ao capturar screenshots",
+                            "description": str(e),
+                            "guide_ref": "responsive-guide.md §10.2"
+                        }]
+                    })
+                return screenshots
+            except Exception as e2:
+                print(f"Error generating fallback placeholders: {e2}")
+                return []
 
 class LayoutAnalysisTool:
     """Tool for analyzing layout issues"""
@@ -247,7 +568,7 @@ class VisionAnalysisTool:
             for screenshot in screenshots:
                 try:
                     # Download and process screenshot
-                    screenshot_path = Path("screenshots") / screenshot["url"].split("/")[-1]
+                    screenshot_path = Path(__file__).resolve().parents[2] / "screenshots" / screenshot["url"].split("/")[-1]
                     
                     if not screenshot_path.exists():
                         continue
@@ -406,6 +727,129 @@ class DocumentationSearchTool:
             print(f"Error searching documentation: {e}")
             return {"error": str(e), "query": query}
 
+class TechnologyDetectionTool:
+    """Tool for detecting website technologies and SEO meta tags"""
+
+    name: str = "detect_technology"
+    description: str = "Detect frameworks, CMS, libraries, languages and SEO meta"
+
+    async def run(self, url: str) -> Dict[str, Any]:
+        """Fetch page and infer technologies and SEO metadata"""
+        try:
+            print(f"Detecting technology for {url}")
+            response = requests.get(url, timeout=30)
+            soup = BeautifulSoup(response.content, 'html.parser')
+
+            tech = {
+                "frameworks": [],
+                "cms": None,
+                "libraries": [],
+                "languages": [],
+                "server": response.headers.get('Server')
+            }
+
+            # CMS via generator meta
+            generator = soup.find('meta', attrs={'name': 'generator'})
+            if generator and generator.get('content'):
+                gen = generator.get('content').lower()
+                if 'wordpress' in gen:
+                    tech["cms"] = 'WordPress'
+                elif 'drupal' in gen:
+                    tech["cms"] = 'Drupal'
+                elif 'joomla' in gen:
+                    tech["cms"] = 'Joomla'
+                elif 'ghost' in gen:
+                    tech["cms"] = 'Ghost'
+
+            # URLs indicating CMS
+            html_text = response.text.lower()
+            if not tech["cms"]:
+                if 'wp-content' in html_text or 'wp-includes' in html_text:
+                    tech["cms"] = 'WordPress'
+                elif 'cdn.shopify.com' in html_text or 'shopify' in html_text:
+                    tech["cms"] = 'Shopify'
+                elif 'squarespace' in html_text:
+                    tech["cms"] = 'Squarespace'
+                elif 'wix' in html_text:
+                    tech["cms"] = 'Wix'
+
+            # Frameworks heuristics
+            if '__NEXT_DATA__' in html_text or 'next.config' in html_text:
+                tech["frameworks"].append('Next.js')
+            if 'window.__NUXT__' in html_text:
+                tech["frameworks"].append('Nuxt')
+            if 'data-reactroot' in html_text or 'react' in html_text and 'react-dom' in html_text:
+                tech["frameworks"].append('React')
+            if 'ng-version' in html_text or 'ng-app' in html_text or 'angular' in html_text:
+                tech["frameworks"].append('Angular')
+            if 'vue' in html_text and ('vue.js' in html_text or 'vue.runtime' in html_text or 'data-v-' in html_text):
+                tech["frameworks"].append('Vue')
+            if 'svelte' in html_text or 'data-svelte' in html_text:
+                tech["frameworks"].append('Svelte')
+
+            # Libraries / CSS frameworks
+            links = soup.find_all('link', href=True)
+            scripts = soup.find_all('script', src=True)
+            hrefs = ' '.join([l['href'] for l in links])
+            srcs = ' '.join([s['src'] for s in scripts])
+            combined = (hrefs + ' ' + srcs).lower()
+            if 'bootstrap' in combined:
+                tech["libraries"].append('Bootstrap')
+            if 'tailwind' in combined or any(cls.startswith(('sm:', 'md:', 'lg:', 'xl:', '2xl:')) for cls in soup.get_text().split()):
+                tech["libraries"].append('Tailwind CSS')
+            if 'jquery' in combined:
+                tech["libraries"].append('jQuery')
+            if 'material-ui' in combined or '@mui' in combined:
+                tech["libraries"].append('MUI')
+
+            # Languages inference
+            if tech["frameworks"]:
+                tech["languages"].append('JavaScript/TypeScript')
+            if tech["cms"] in ['WordPress', 'Drupal', 'Joomla']:
+                tech["languages"].append('PHP')
+            if 'ruby on rails' in html_text or 'rails' in combined:
+                tech["languages"].append('Ruby')
+            if 'django' in combined or 'flask' in combined:
+                tech["languages"].append('Python')
+
+            # SEO Meta
+            seo = {
+                "title": soup.title.string.strip() if soup.title and soup.title.string else None,
+                "description": None,
+                "keywords": None,
+                "robots": None,
+                "canonical": None,
+                "og": {},
+                "twitter": {}
+            }
+            desc = soup.find('meta', attrs={'name': 'description'})
+            if desc and desc.get('content'):
+                seo["description"] = desc.get('content').strip()
+            keywords = soup.find('meta', attrs={'name': 'keywords'})
+            if keywords and keywords.get('content'):
+                seo["keywords"] = keywords.get('content').strip()
+            robots = soup.find('meta', attrs={'name': 'robots'})
+            if robots and robots.get('content'):
+                seo["robots"] = robots.get('content').strip()
+            canonical = soup.find('link', attrs={'rel': 'canonical'})
+            if canonical and canonical.get('href'):
+                seo["canonical"] = canonical.get('href').strip()
+
+            for meta in soup.find_all('meta'):
+                prop = meta.get('property') or meta.get('name')
+                content = meta.get('content')
+                if not prop or not content:
+                    continue
+                if prop.startswith('og:'):
+                    seo["og"][prop] = content
+                if prop.startswith('twitter:'):
+                    seo["twitter"][prop] = content
+
+            return {"technology": tech, "seo": seo}
+        except Exception as e:
+            print(f"Error detecting technology: {e}")
+            return {"technology": {}, "seo": {}, "error": str(e)}
+
 class SuggestionGeneratorTool:
     """Tool for generating practical suggestions"""
     
@@ -427,6 +871,7 @@ class SuggestionGeneratorTool:
                     before = None
                     after = None
                     documentation = None
+                    justification = None
                     
                     # Generate specific recommendations based on issue type
                     if "viewport" in issue.get("title", "").lower():
@@ -436,8 +881,13 @@ class SuggestionGeneratorTool:
                         before = "Sem viewport meta tag"
                         after = code_example
                         documentation = "https://developer.mozilla.org/pt-BR/docs/Web/HTML/Viewport_meta_tag"
+                        justification = (
+                            "A tag viewport informa ao navegador como dimensionar e escalar o layout em dispositivos móveis. "
+                            "Sem ela, o conteúdo é renderizado em uma largura fixa, causando zoom e rolagem indesejados. "
+                            "Recomendação alinhada ao HTML5/W3C e à documentação oficial da MDN."
+                        )
                         
-                    elif "media query" in issue.get("title", "").lower():
+                    elif ("media query" in issue.get("title", "").lower() or "media queries" in issue.get("title", "").lower()):
                         category = "css"
                         priority = "high"
                         code_example = """/* Mobile first approach */
@@ -463,7 +913,77 @@ class SuggestionGeneratorTool:
                         before = "Estilos sem media queries"
                         after = "Estilos com media queries responsivas"
                         documentation = "https://developer.mozilla.org/pt-BR/docs/Web/CSS/Media_Queries/Using_media_queries"
+                        justification = (
+                            "Media queries permitem adaptar o layout a diferentes larguras de viewport. "
+                            "Seguir a abordagem mobile-first simplifica o CSS e melhora a experiência em dispositivos móveis. "
+                            "Padrões W3C para WebApps e guia da MDN recomendam seu uso para responsividade."
+                        )
                         
+                    elif "scroll horizontal" in issue.get("title", "").lower():
+                        category = "css"
+                        priority = "high"
+                        code_example = """/* Diagnóstico e correção de overflow horizontal */
+html, body { max-width: 100%; overflow-x: hidden; }
+* { box-sizing: border-box; }
+
+/* Evite width: 100vw em containers internos */
+.container { width: 100%; max-width: 100%; }"""
+                        before = "Layout com elementos excedendo a largura do viewport"
+                        after = "Layout sem overflow horizontal e com box-sizing correto"
+                        documentation = "https://developer.mozilla.org/pt-BR/docs/Web/CSS/overflow"
+                        justification = (
+                            "O guia recomenda que não exista scroll horizontal em nenhum breakpoint (responsive-guide.md §10.2) "
+                            "e aponta antipadrões comuns como uso indevido de 100vw (responsive-guide.md §11). "
+                            "A MDN documenta overflow e box-sizing como ferramentas para prevenir e diagnosticar o problema."
+                        )
+
+                    elif "fonte" in issue.get("title", "").lower() and "mínimo" in issue.get("title", "").lower():
+                        category = "css"
+                        priority = "medium"
+                        code_example = """html { font-size: 100%; } /* 16px padrão */
+body { font-size: 1rem; line-height: 1.5; }
+@media (max-width: 768px) { body { font-size: 1rem; } }"""
+                        before = "Texto do corpo abaixo de 16px"
+                        after = "Texto do corpo com 1rem (16px) e boa legibilidade"
+                        documentation = "https://developer.mozilla.org/pt-BR/docs/Web/CSS/font-size"
+                        justification = (
+                            "O checklist do guia recomenda 16px (1rem) como tamanho mínimo de fonte para o corpo (responsive-guide.md §10.3) "
+                            "e aponta fontes muito pequenas como antipadrão em mobile (responsive-guide.md §11)."
+                        )
+
+                    elif "alvos de toque" in issue.get("title", "").lower() or "toque" in issue.get("title", "").lower():
+                        category = "accessibility"
+                        priority = "high"
+                        code_example = """/* Garanta alvos de toque adequados */
+button, a[role=\"button\"], .btn {
+  min-width: 44px;
+  min-height: 44px;
+  padding: 12px 16px;
+}"""
+                        before = "Elementos clicáveis com área menor que 44x44px"
+                        after = "Elementos clicáveis com área mínima adequada e padding"
+                        documentation = "https://w3c.br/padroes/"
+                        justification = (
+                            "O guia recomenda área mínima de toque 44×44px e espaçamento entre alvos (responsive-guide.md §10.5). "
+                            "Essa regra melhora usabilidade em touch e é consistente com diretrizes de acessibilidade da plataforma web aberta (W3C)."
+                        )
+
+                    elif "mídia maior que o viewport" in issue.get("title", "").lower():
+                        category = "css"
+                        priority = "high"
+                        code_example = """img, video, embed, object, iframe {
+  max-width: 100%;
+  height: auto;
+}
+.media-wrap { width: 100%; overflow: hidden; }"""
+                        before = "Imagens/iframes estourando o container"
+                        after = "Mídia responsiva com max-width: 100% e altura automática"
+                        documentation = "https://developer.mozilla.org/pt-BR/docs/Web/CSS/object-fit"
+                        justification = (
+                            "O guia define como obrigatório que imagens e mídia respeitem o container (responsive-guide.md §6 / §10.4). "
+                            "Ajustar max-width/height evita overflow e distorção conforme documentação da MDN."
+                        )
+
                     elif "texto" in issue.get("title", "").lower() or "font" in issue.get("title", "").lower():
                         category = "css"
                         priority = "medium"
@@ -484,6 +1004,10 @@ body {
                         before = "Fontes fixas muito pequenas"
                         after = "Fontes relativas e adaptativas"
                         documentation = "https://developer.mozilla.org/pt-BR/docs/Web/CSS/font-size"
+                        justification = (
+                            "Tamanhos de fonte relativos e adaptativos evitam texto ilegível em telas pequenas e reduzem o zoom automático em iOS. "
+                            "A MDN recomenda o uso de unidades relativas (rem/em) para escalabilidade."
+                        )
                         
                     elif "largura" in issue.get("title", "").lower() or "width" in issue.get("title", "").lower():
                         category = "css"
@@ -503,6 +1027,10 @@ body {
                         before = "Larguras fixas em pixels"
                         after = "Larguras relativas com max-width"
                         documentation = "https://developer.mozilla.org/pt-BR/docs/Web/CSS/width"
+                        justification = (
+                            "Larguras fixas quebram o layout em viewports menores e causam rolagem horizontal. "
+                            "Larguras fluidas com max-width permitem layout adaptável conforme recomendado pela MDN e padrões W3C."
+                        )
                         
                     elif "touch" in issue.get("title", "").lower() or "botão" in issue.get("title", "").lower():
                         category = "css"
@@ -517,6 +1045,10 @@ body {
                         before = "Botões pequenos (< 44px)"
                         after = "Botões com tamanho mínimo adequado"
                         documentation = "https://developer.mozilla.org/pt-BR/docs/Web/CSS/touch-action"
+                        justification = (
+                            "Alvos de toque muito pequenos prejudicam a usabilidade e violam princípios de acessibilidade (WCAG). "
+                            "Aumentar áreas de toque para ~44px melhora a operabilidade em dispositivos touch; referência de boas práticas em MDN/W3C."
+                        )
                         
                     elif "imagem" in issue.get("title", "").lower() or "image" in issue.get("title", "").lower():
                         category = "css"
@@ -537,6 +1069,10 @@ img {
                         before = "Imagens com largura fixa"
                         after = "Imagens responsivas com max-width: 100%"
                         documentation = "https://developer.mozilla.org/pt-BR/docs/Web/CSS/object-fit"
+                        justification = (
+                            "Imagens devem escalar dentro do container para evitar overflow e distorção. "
+                            "MDN recomenda `max-width: 100%` e `object-fit` para preservar proporções."
+                        )
                         
                     elif "scroll" in issue.get("title", "").lower() or "rolagem" in issue.get("title", "").lower():
                         category = "css"
@@ -554,6 +1090,10 @@ html, body {
                         before = "Scroll horizontal indesejado"
                         after = "Layout sem scroll horizontal"
                         documentation = "https://developer.mozilla.org/pt-BR/docs/Web/CSS/overflow"
+                        justification = (
+                            "Overflow horizontal indica elementos com largura maior que a viewport. "
+                            "Garantir `box-sizing: border-box` e revisar widths evita clipping/rolagem; abordagem alinhada às recomendações da MDN/W3C."
+                        )
                         
                     else:
                         # Generic recommendation
@@ -561,6 +1101,11 @@ html, body {
 .element {
   /* Adicione estilos responsivos aqui */
 }"""
+                        justification = (
+                            "Ajustes responsivos devem considerar layout fluido, tipografia acessível e imagens adaptativas, "
+                            "conforme boas práticas dos padrões W3C e guias da MDN."
+                        )
+                        documentation = "https://developer.mozilla.org/pt-BR/"
                     
                     # Determine priority based on issue severity
                     severity = issue.get("severity", 3)
@@ -576,6 +1121,7 @@ html, body {
                         "category": category,
                         "title": f"Correção: {issue.get('title', 'Problema')}",
                         "description": f"Solução para: {issue.get('description', 'Problema detectado')}",
+                        "justification": justification,
                         "code_example": code_example,
                         "before": before,
                         "after": after,
@@ -606,7 +1152,10 @@ class ReportGeneratorTool:
         url: str, 
         screenshots: List[Dict[str, Any]], 
         issues: List[Dict[str, Any]], 
-        recommendations: List[Dict[str, Any]]
+        recommendations: List[Dict[str, Any]],
+        technology: Optional[Dict[str, Any]] = None,
+        seo: Optional[Dict[str, Any]] = None,
+        guide: Optional[Dict[str, Any]] = None
     ) -> Dict[str, Any]:
         """Generate HTML report"""
         try:
@@ -632,6 +1181,127 @@ class ReportGeneratorTool:
             """
             
             # Generate HTML report
+            # Technology section HTML
+            tech_html = ""
+            if technology:
+                frameworks = ', '.join(technology.get('frameworks', []) or []) or 'Não detectado'
+                cms = technology.get('cms') or 'Não detectado'
+                libraries = ', '.join(technology.get('libraries', []) or []) or 'Não detectado'
+                languages = ', '.join(technology.get('languages', []) or []) or 'Não detectado'
+                server = technology.get('server') or 'Não detectado'
+                tech_html = f"""
+                <div class=\"section\">
+                    <h2>Tecnologias Detectadas</h2>
+                    <p><strong>Frameworks:</strong> {frameworks}</p>
+                    <p><strong>CMS:</strong> {cms}</p>
+                    <p><strong>Bibliotecas:</strong> {libraries}</p>
+                    <p><strong>Linguagens:</strong> {languages}</p>
+                    <p><strong>Servidor:</strong> {server}</p>
+                </div>
+                """
+
+            # SEO section HTML
+            seo_html = ""
+            if seo:
+                og_list = ''.join([f"<li><code>{k}</code>: {v}</li>" for k, v in (seo.get('og') or {}).items()])
+                tw_list = ''.join([f"<li><code>{k}</code>: {v}</li>" for k, v in (seo.get('twitter') or {}).items()])
+                seo_html = f"""
+                <div class=\"section\">
+                    <h2>SEO Meta Tags</h2>
+                    <p><strong>Title:</strong> {seo.get('title') or 'Não encontrado'}</p>
+                    <p><strong>Description:</strong> {seo.get('description') or 'Não encontrado'}</p>
+                    <p><strong>Keywords:</strong> {seo.get('keywords') or 'Não encontrado'}</p>
+                    <p><strong>Robots:</strong> {seo.get('robots') or 'Não encontrado'}</p>
+                    <p><strong>Canonical:</strong> {seo.get('canonical') or 'Não encontrado'}</p>
+                    <div>
+                        <h3>Open Graph</h3>
+                        <ul>{og_list or '<li>Nenhum</li>'}</ul>
+                    </div>
+                    <div>
+                        <h3>Twitter Cards</h3>
+                        <ul>{tw_list or '<li>Nenhum</li>'}</ul>
+                    </div>
+                </div>
+                """
+
+            guide_html = ""
+            compliance_html = ""
+            if guide:
+                excerpts = guide.get("excerpts") or {}
+                mq = excerpts.get("media_queries")
+                layout = excerpts.get("layout_guidelines")
+                components = excerpts.get("component_patterns")
+                guide_html = f"""
+                <div class="section">
+                    <h2>Guia de Responsividade (responsive-guide.md)</h2>
+                    <p><strong>Versão:</strong> {guide.get('version') or 'N/A'}</p>
+                    <p><strong>Arquivo:</strong> {guide.get('path') or 'responsive-guide.md'}</p>
+                    {f'<details><summary><strong>Regras de Media Queries</strong></summary><pre class=\"code-example\">{mq}</pre></details>' if mq else ''}
+                    {f'<details><summary><strong>Diretrizes de Layout</strong></summary><pre class=\"code-example\">{layout}</pre></details>' if layout else ''}
+                    {f'<details><summary><strong>Padrões de Componentes</strong></summary><pre class=\"code-example\">{components}</pre></details>' if components else ''}
+                </div>
+                """
+
+                bp_list = guide.get("breakpoints") or []
+                rows = []
+                details = []
+                for bp in bp_list:
+                    bp_id = bp.get("id")
+                    bp_label = bp.get("label") or bp_id
+                    bp_w = bp.get("width")
+                    bp_h = bp.get("height")
+                    sc = next((s for s in (screenshots or []) if s.get("device") == bp_id), None)
+                    compliant = sc.get("compliant") if sc else None
+                    status = "Conforme" if compliant else "Não conforme" if compliant is False else "Indefinido"
+                    status_color = "#155724" if compliant else "#721c24" if compliant is False else "#856404"
+                    violations = (sc.get("violations") or []) if sc else []
+                    rows.append(
+                        f"<tr>"
+                        f"<td>{bp_label}</td>"
+                        f"<td>{bp_w}×{bp_h}</td>"
+                        f"<td style='color:{status_color}; font-weight:700'>{status}</td>"
+                        f"<td>{len(violations)}</td>"
+                        f"</tr>"
+                    )
+
+                    if compliant is False:
+                        v_list = ''.join([f"<li><strong>{v.get('title','')}</strong> — {v.get('description','')} <em>({v.get('guide_ref','')})</em></li>" for v in violations])
+                        screenshot_block = ""
+                        if sc and sc.get("url"):
+                            screenshot_block = (
+                                f'<div class="screenshot">'
+                                f'<img src="{sc.get("url")}" alt="{bp_label}">'
+                                f'<div class="screenshot-caption">{bp_label} ({bp_w}×{bp_h})</div>'
+                                f'</div>'
+                            )
+                        details.append(f"""
+                        <div class="issue warning">
+                            <h3>{bp_label} — Não conformidades</h3>
+                            <ul>{v_list or '<li>Nenhuma</li>'}</ul>
+                            {screenshot_block}
+                        </div>
+                        """)
+
+                compliance_html = f"""
+                <div class="section">
+                    <h2>Conformidade por Breakpoint</h2>
+                    <table style="width:100%; border-collapse: collapse;">
+                        <thead>
+                            <tr>
+                                <th style="text-align:left; border-bottom:1px solid #e0e0e0; padding:8px;">Breakpoint</th>
+                                <th style="text-align:left; border-bottom:1px solid #e0e0e0; padding:8px;">Viewport</th>
+                                <th style="text-align:left; border-bottom:1px solid #e0e0e0; padding:8px;">Status</th>
+                                <th style="text-align:left; border-bottom:1px solid #e0e0e0; padding:8px;">Violações</th>
+                            </tr>
+                        </thead>
+                        <tbody>
+                            {''.join(rows)}
+                        </tbody>
+                    </table>
+                </div>
+                {''.join(details)}
+                """
+
             html_content = f"""
 <!DOCTYPE html>
 <html lang="pt-BR">
@@ -799,6 +1469,11 @@ class ReportGeneratorTool:
                 <h2>Sumário Executivo</h2>
                 <p>{summary}</p>
             </div>
+
+            {tech_html}
+            {seo_html}
+            {guide_html}
+            {compliance_html}
             
             <div class="section">
                 <h2>Capturas de Tela</h2>
@@ -839,6 +1514,7 @@ class ReportGeneratorTool:
                         <p><strong>Categoria:</strong> {rec.get('category', 'css').upper()}</p>
                         <p><strong>Prioridade:</strong> {rec.get('priority', 'medium').title()}</p>
                         <p><strong>Descrição:</strong> {rec.get('description', 'Sem descrição')}</p>
+                        {f'<p><strong>Justificativa:</strong> {rec.get("justification", "")}</p>' if rec.get('justification') else ''}
                         {f'<div class="code-example"><strong>Exemplo de código:</strong><br><code>{rec.get("code_example", "")}</code></div>' if rec.get('code_example') else ''}
                         {f'<p><strong>Antes:</strong> {rec.get("before", "")}</p>' if rec.get('before') else ''}
                         {f'<p><strong>Depois:</strong> {rec.get("after", "")}</p>' if rec.get('after') else ''}
@@ -860,7 +1536,9 @@ class ReportGeneratorTool:
             
             # Save report to file
             report_filename = f"report_{analysis_id}_{datetime.now().strftime('%Y%m%d_%H%M%S')}.html"
-            report_path = Path("reports") / report_filename
+            reports_dir = Path(__file__).resolve().parents[2] / "reports"
+            reports_dir.mkdir(exist_ok=True)
+            report_path = reports_dir / report_filename
             
             with open(report_path, 'w', encoding='utf-8') as f:
                 f.write(html_content)
@@ -882,15 +1560,25 @@ class ResponsiveTestingAgent:
     
     def __init__(self):
         self.db = None
+
+    def load_responsive_guide(self) -> Dict[str, Any]:
+        tool = ResponsiveGuideTool()
+        return tool.load_and_parse()
     
-    async def capture_screenshots(self, url: str, analysis_id: str) -> List[Dict[str, Any]]:
+    async def capture_screenshots(
+        self,
+        url: str,
+        analysis_id: str,
+        breakpoints: Optional[List[Dict[str, Any]]] = None,
+        guide_rules: Optional[Dict[str, Any]] = None
+    ) -> List[Dict[str, Any]]:
         """Capture screenshots using the agent"""
         try:
             print(f"Agent capturing screenshots for {url}")
             
             # Use the screenshot tool directly
             screenshot_tool = ScreenshotCaptureTool()
-            screenshots = await screenshot_tool.run(url, analysis_id)
+            screenshots = await screenshot_tool.run(url, analysis_id, breakpoints=breakpoints, guide_rules=guide_rules)
             
             return screenshots
             
@@ -927,6 +1615,16 @@ class ResponsiveTestingAgent:
         except Exception as e:
             print(f"Error in vision analysis: {e}")
             return []
+
+    async def detect_technology(self, url: str) -> Dict[str, Any]:
+        """Detect website technology and SEO"""
+        try:
+            print(f"Agent detecting technology for {url}")
+            tool = TechnologyDetectionTool()
+            return await tool.run(url)
+        except Exception as e:
+            print(f"Error detecting technology: {e}")
+            return {"technology": {}, "seo": {}}
     
     async def generate_suggestions(self, issues: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
         """Generate suggestions for issues"""
@@ -949,7 +1647,10 @@ class ResponsiveTestingAgent:
         url: str, 
         screenshots: List[Dict[str, Any]], 
         issues: List[Dict[str, Any]], 
-        recommendations: List[Dict[str, Any]]
+        recommendations: List[Dict[str, Any]],
+        technology: Optional[Dict[str, Any]] = None,
+        seo: Optional[Dict[str, Any]] = None,
+        guide: Optional[Dict[str, Any]] = None
     ) -> Dict[str, Any]:
         """Create HTML report"""
         try:
@@ -957,7 +1658,7 @@ class ResponsiveTestingAgent:
             
             # Use the report generator tool directly
             report_tool = ReportGeneratorTool()
-            report_data = await report_tool.run(analysis_id, url, screenshots, issues, recommendations)
+            report_data = await report_tool.run(analysis_id, url, screenshots, issues, recommendations, technology, seo, guide)
             
             return report_data
             

@@ -6,6 +6,7 @@ interface Recommendation {
   category: 'css' | 'html' | 'accessibility' | 'performance' | 'ux';
   title: string;
   description: string;
+  justification?: string;
   codeExample?: string;
   before?: string;
   after?: string;
@@ -19,11 +20,41 @@ interface ReportData {
   timestamp: string;
   summary: string;
   recommendations: Recommendation[];
+  screenshots?: Array<{
+    id: string;
+    device: string;
+    resolution: string;
+    url: string;
+    fullPageUrl?: string;
+    compliant?: boolean;
+    violations?: Array<{ id: string; title: string; description: string; guide_ref?: string }>;
+  }>;
+  guide?: {
+    version?: string;
+    path?: string;
+    breakpoints?: Array<{ id: string; label: string; width: number; height: number }>;
+  };
   score: {
     mobile: number;
     tablet: number;
     desktop: number;
     overall: number;
+  };
+  technology?: {
+    frameworks: string[];
+    cms?: string;
+    libraries: string[];
+    languages: string[];
+    server?: string;
+  };
+  seo?: {
+    title?: string;
+    description?: string;
+    keywords?: string;
+    robots?: string;
+    canonical?: string;
+    og?: Record<string, string>;
+    twitter?: Record<string, string>;
   };
 }
 
@@ -35,6 +66,7 @@ const Report: React.FC<ReportProps> = ({ report }) => {
   const [copiedCode, setCopiedCode] = useState<string | null>(null);
   const [filterCategory, setFilterCategory] = useState<string>('all');
   const [filterPriority, setFilterPriority] = useState<string>('all');
+  const apiBase = (import.meta as any).env?.VITE_API_URL || 'http://localhost:8000';
 
   const categoryIcons = {
     css: Code,
@@ -160,6 +192,121 @@ const Report: React.FC<ReportProps> = ({ report }) => {
           </p>
         </div>
 
+        {report.guide && (
+          <div className="mb-6">
+            <h4 className="text-sm font-medium text-gray-900 mb-2">Guia de Responsividade</h4>
+            <div className="bg-gray-50 p-4 rounded-lg text-sm text-gray-700">
+              <div><span className="font-medium">Versão:</span> {report.guide.version || 'N/A'}</div>
+              <div><span className="font-medium">Arquivo:</span> {report.guide.path || 'responsive-guide.md'}</div>
+            </div>
+          </div>
+        )}
+
+        {report.screenshots && report.screenshots.length > 0 && (
+          <div className="mb-6">
+            <h4 className="text-sm font-medium text-gray-900 mb-2">Conformidade por Breakpoint</h4>
+            <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
+              {report.screenshots.map((sc) => {
+                const statusPill =
+                  sc.compliant === true
+                    ? 'bg-green-100 text-green-800'
+                    : sc.compliant === false
+                      ? 'bg-red-100 text-red-800'
+                      : 'bg-yellow-100 text-yellow-800';
+                const statusLabel = sc.compliant === true ? 'CONFORME' : sc.compliant === false ? 'NÃO CONFORME' : 'INDEFINIDO';
+                const topViolations = (sc.violations || []).slice(0, 3);
+                return (
+                  <div key={sc.id} className="bg-gray-50 p-4 rounded-lg border border-gray-200">
+                    <div className="flex items-center justify-between mb-2">
+                      <div className="text-sm font-medium text-gray-900 capitalize">{sc.device}</div>
+                      <div className={`px-2 py-1 rounded-full text-xs font-medium ${statusPill}`}>
+                        {statusLabel}{sc.violations?.length ? ` • ${sc.violations.length}` : ''}
+                      </div>
+                    </div>
+                    <div className="text-xs text-gray-600 mb-3">{sc.resolution}</div>
+                    <div className="aspect-video bg-white rounded border overflow-hidden mb-3">
+                      <img
+                        src={`${apiBase}${sc.url}`}
+                        alt={`Screenshot ${sc.device}`}
+                        className="w-full h-full object-contain"
+                      />
+                    </div>
+                    {topViolations.length > 0 && (
+                      <ul className="text-xs text-gray-700 list-disc ml-5 space-y-1">
+                        {topViolations.map(v => (
+                          <li key={v.id}>{v.title}</li>
+                        ))}
+                      </ul>
+                    )}
+                  </div>
+                );
+              })}
+            </div>
+          </div>
+        )}
+
+        {/* Tecnologias Detectadas */}
+        {report.technology && (
+          <div className="mb-6">
+            <h4 className="text-sm font-medium text-gray-900 mb-2">Tecnologias Detectadas</h4>
+            <div className="grid grid-cols-1 md:grid-cols-2 gap-4 bg-gray-50 p-4 rounded-lg text-sm text-gray-700">
+              <div>
+                <span className="font-medium">Frameworks:</span> {report.technology.frameworks?.length ? report.technology.frameworks.join(', ') : 'Não detectado'}
+              </div>
+              <div>
+                <span className="font-medium">CMS:</span> {report.technology.cms || 'Não detectado'}
+              </div>
+              <div>
+                <span className="font-medium">Bibliotecas:</span> {report.technology.libraries?.length ? report.technology.libraries.join(', ') : 'Não detectado'}
+              </div>
+              <div>
+                <span className="font-medium">Linguagens:</span> {report.technology.languages?.length ? report.technology.languages.join(', ') : 'Não detectado'}
+              </div>
+              <div>
+                <span className="font-medium">Servidor:</span> {report.technology.server || 'Não detectado'}
+              </div>
+            </div>
+          </div>
+        )}
+
+        {/* SEO Meta Tags */}
+        {report.seo && (
+          <div className="mb-6">
+            <h4 className="text-sm font-medium text-gray-900 mb-2">SEO Meta Tags</h4>
+            <div className="space-y-2 bg-gray-50 p-4 rounded-lg text-sm text-gray-700">
+              <div><span className="font-medium">Title:</span> {report.seo.title || 'Não encontrado'}</div>
+              <div><span className="font-medium">Description:</span> {report.seo.description || 'Não encontrado'}</div>
+              <div><span className="font-medium">Keywords:</span> {report.seo.keywords || 'Não encontrado'}</div>
+              <div><span className="font-medium">Robots:</span> {report.seo.robots || 'Não encontrado'}</div>
+              <div><span className="font-medium">Canonical:</span> {report.seo.canonical || 'Não encontrado'}</div>
+              <div>
+                <span className="font-medium">Open Graph:</span>
+                <ul className="list-disc ml-5">
+                  {report.seo.og && Object.keys(report.seo.og).length > 0 ? (
+                    Object.entries(report.seo.og).map(([k, v]) => (
+                      <li key={k}><code className="bg-white px-1 rounded border">{k}</code>: {v}</li>
+                    ))
+                  ) : (
+                    <li>Nenhum</li>
+                  )}
+                </ul>
+              </div>
+              <div>
+                <span className="font-medium">Twitter Cards:</span>
+                <ul className="list-disc ml-5">
+                  {report.seo.twitter && Object.keys(report.seo.twitter).length > 0 ? (
+                    Object.entries(report.seo.twitter).map(([k, v]) => (
+                      <li key={k}><code className="bg-white px-1 rounded border">{k}</code>: {v}</li>
+                    ))
+                  ) : (
+                    <li>Nenhum</li>
+                  )}
+                </ul>
+              </div>
+            </div>
+          </div>
+        )}
+
         <div className="flex flex-wrap gap-4">
           <div className="flex items-center space-x-2">
             <label className="text-sm font-medium text-gray-700">Categoria:</label>
@@ -226,6 +373,12 @@ const Report: React.FC<ReportProps> = ({ report }) => {
                   <p className="text-gray-700 mb-4">
                     {recommendation.description}
                   </p>
+
+                  {recommendation.justification && (
+                    <p className="text-gray-700 mb-4">
+                      <span className="font-medium">Justificativa:</span> {recommendation.justification}
+                    </p>
+                  )}
 
                   {recommendation.before && recommendation.after && (
                     <div className="grid grid-cols-1 md:grid-cols-2 gap-4 mb-4">
@@ -307,6 +460,7 @@ const Report: React.FC<ReportProps> = ({ report }) => {
 };
 
 function generateHTMLReport(report: ReportData): string {
+  const apiBase = (import.meta as any).env?.VITE_API_URL || 'http://localhost:8000';
   return `
 <!DOCTYPE html>
 <html lang="pt-BR">
@@ -325,6 +479,7 @@ function generateHTMLReport(report: ReportData): string {
         .recommendation { margin-bottom: 30px; padding: 20px; border: 1px solid #e0e0e0; border-radius: 8px; }
         .code-example { background: #f8f9fa; padding: 15px; border-radius: 4px; font-family: 'Courier New', monospace; font-size: 14px; overflow-x: auto; }
         .summary { padding: 20px; background: #f8f9fa; border-radius: 8px; margin: 20px; }
+        .section { padding: 20px; margin: 20px; background: #f8f9fa; border-radius: 8px; }
     </style>
 </head>
 <body>
@@ -358,6 +513,75 @@ function generateHTMLReport(report: ReportData): string {
             <h3>Sumário Executivo</h3>
             <p>${report.summary}</p>
         </div>
+
+        <div class="section">
+            <h2>Conformidade por Breakpoint</h2>
+            <table style="width:100%; border-collapse: collapse;">
+                <thead>
+                    <tr>
+                        <th style="text-align:left; border-bottom:1px solid #e0e0e0; padding:8px;">Breakpoint</th>
+                        <th style="text-align:left; border-bottom:1px solid #e0e0e0; padding:8px;">Resolução</th>
+                        <th style="text-align:left; border-bottom:1px solid #e0e0e0; padding:8px;">Status</th>
+                        <th style="text-align:left; border-bottom:1px solid #e0e0e0; padding:8px;">Violações</th>
+                    </tr>
+                </thead>
+                <tbody>
+                    ${(report.screenshots || []).map(sc => `
+                        <tr>
+                            <td style="padding:8px; border-bottom:1px solid #f0f0f0;">${sc.device}</td>
+                            <td style="padding:8px; border-bottom:1px solid #f0f0f0;">${sc.resolution}</td>
+                            <td style="padding:8px; border-bottom:1px solid #f0f0f0;">${sc.compliant === true ? 'Conforme' : sc.compliant === false ? 'Não conforme' : 'Indefinido'}</td>
+                            <td style="padding:8px; border-bottom:1px solid #f0f0f0;">${sc.violations?.length || 0}</td>
+                        </tr>
+                    `).join('')}
+                </tbody>
+            </table>
+            ${(report.screenshots || []).map(sc => sc.compliant === false ? `
+                <div class="recommendation">
+                    <h4>${sc.device} — evidências</h4>
+                    <img src="${apiBase}${sc.url}" style="max-width:100%; height:auto; border:1px solid #e0e0e0; border-radius:8px" />
+                    ${sc.violations?.length ? `
+                        <ul>
+                            ${sc.violations.map(v => `<li><strong>${v.title}</strong> — ${v.description}</li>`).join('')}
+                        </ul>
+                    ` : ''}
+                </div>
+            ` : '').join('')}
+        </div>
+
+        <div class="section">
+            <h2>Tecnologias Detectadas</h2>
+            <p><strong>Frameworks:</strong> ${report.technology?.frameworks?.length ? report.technology.frameworks.join(', ') : 'Não detectado'}</p>
+            <p><strong>CMS:</strong> ${report.technology?.cms || 'Não detectado'}</p>
+            <p><strong>Bibliotecas:</strong> ${report.technology?.libraries?.length ? report.technology.libraries.join(', ') : 'Não detectado'}</p>
+            <p><strong>Linguagens:</strong> ${report.technology?.languages?.length ? report.technology.languages.join(', ') : 'Não detectado'}</p>
+            <p><strong>Servidor:</strong> ${report.technology?.server || 'Não detectado'}</p>
+        </div>
+
+        <div class="section">
+            <h2>SEO Meta Tags</h2>
+            <p><strong>Title:</strong> ${report.seo?.title || 'Não encontrado'}</p>
+            <p><strong>Description:</strong> ${report.seo?.description || 'Não encontrado'}</p>
+            <p><strong>Keywords:</strong> ${report.seo?.keywords || 'Não encontrado'}</p>
+            <p><strong>Robots:</strong> ${report.seo?.robots || 'Não encontrado'}</p>
+            <p><strong>Canonical:</strong> ${report.seo?.canonical || 'Não encontrado'}</p>
+            <div>
+                <h3>Open Graph</h3>
+                <ul>
+                    ${report.seo?.og && Object.keys(report.seo.og).length > 0 ? (
+                      Object.entries(report.seo.og).map(([k, v]) => `<li><code>${k}</code>: ${v}</li>`).join('')
+                    ) : '<li>Nenhum</li>'}
+                </ul>
+            </div>
+            <div>
+                <h3>Twitter Cards</h3>
+                <ul>
+                    ${report.seo?.twitter && Object.keys(report.seo.twitter).length > 0 ? (
+                      Object.entries(report.seo.twitter).map(([k, v]) => `<li><code>${k}</code>: ${v}</li>`).join('')
+                    ) : '<li>Nenhum</li>'}
+                </ul>
+            </div>
+        </div>
         
         <div class="recommendations">
             <h2>Recomendações</h2>
@@ -367,6 +591,7 @@ function generateHTMLReport(report: ReportData): string {
                     <p><strong>Categoria:</strong> ${rec.category}</p>
                     <p><strong>Prioridade:</strong> ${rec.priority}</p>
                     <p>${rec.description}</p>
+                    ${rec.justification ? `<p><strong>Justificativa:</strong> ${rec.justification}</p>` : ''}
                     ${rec.codeExample ? `
                         <div class="code-example">
                             <strong>Exemplo de código:</strong><br>

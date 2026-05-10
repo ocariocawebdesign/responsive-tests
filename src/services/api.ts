@@ -3,6 +3,22 @@ import { AnalysisResult } from '../stores/analysisStore';
 const API_BASE_URL = import.meta.env.VITE_API_URL || 'http://localhost:8000';
 
 class ApiService {
+  private assertApiBaseUrlIsReachableFromHere() {
+    if (typeof window === 'undefined') return;
+    const origin = window.location.origin;
+    const isFrontendLocal =
+      origin.includes('localhost') || origin.includes('127.0.0.1') || origin.includes('0.0.0.0');
+    const isApiLocal =
+      API_BASE_URL.includes('localhost') || API_BASE_URL.includes('127.0.0.1') || API_BASE_URL.includes('0.0.0.0');
+
+    if (!isFrontendLocal && isApiLocal) {
+      throw new Error(
+        `API configurada como ${API_BASE_URL}, mas o frontend está em ${origin}. ` +
+          `Em produção, defina VITE_API_URL para a URL pública do backend (HTTPS).`
+      );
+    }
+  }
+
   private logNetworkError(context: string, url: string, error: unknown) {
     const origin = typeof window !== 'undefined' ? window.location.origin : 'unknown';
     const online = typeof navigator !== 'undefined' ? navigator.onLine : true;
@@ -18,6 +34,7 @@ class ApiService {
 
   private async diagnose(): Promise<void> {
     try {
+      this.assertApiBaseUrlIsReachableFromHere();
       const res = await fetch(`${API_BASE_URL}/api/health`, { method: 'GET' });
       const ok = res.ok;
       console.info('[Diagnóstico] Healthcheck da API', {
@@ -34,6 +51,7 @@ class ApiService {
     const timeoutId = setTimeout(() => controller.abort(), timeout);
 
     try {
+      this.assertApiBaseUrlIsReachableFromHere();
       const response = await fetch(url, {
         ...options,
         signal: controller.signal,

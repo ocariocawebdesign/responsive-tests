@@ -6,6 +6,13 @@ interface ScreenshotData {
   resolution: string;
   url: string;
   fullPageUrl?: string;
+  compliant?: boolean;
+  violations?: Array<{
+    id: string;
+    title: string;
+    description: string;
+    guide_ref?: string;
+  }>;
 }
 
 interface Issue {
@@ -14,7 +21,7 @@ interface Issue {
   severity: number;
   title: string;
   description: string;
-  device: 'mobile' | 'tablet' | 'desktop' | '4k';
+  device: 'mobile' | 'tablet' | 'desktop' | 'large-desktop' | 'all' | 'guide';
   element?: string;
   suggestion?: string;
 }
@@ -24,11 +31,30 @@ interface Recommendation {
   category: 'css' | 'html' | 'accessibility' | 'performance' | 'ux';
   title: string;
   description: string;
+  justification?: string;
   codeExample?: string;
   before?: string;
   after?: string;
   documentation?: string;
   priority: 'high' | 'medium' | 'low';
+}
+
+interface TechnologyInfo {
+  frameworks: string[];
+  cms?: string;
+  libraries: string[];
+  languages: string[];
+  server?: string;
+}
+
+interface SeoMeta {
+  title?: string;
+  description?: string;
+  keywords?: string;
+  robots?: string;
+  canonical?: string;
+  og?: Record<string, string>;
+  twitter?: Record<string, string>;
 }
 
 export interface AnalysisResult {
@@ -49,6 +75,19 @@ export interface AnalysisResult {
   currentStep?: number;
   totalSteps?: number;
   statusMessage?: string;
+  technology?: TechnologyInfo;
+  seo?: SeoMeta;
+  guide?: {
+    version?: string;
+    path?: string;
+    breakpoints?: Array<{
+      id: string;
+      label: string;
+      width: number;
+      height: number;
+    }>;
+    rules?: Record<string, any>;
+  };
 }
 
 interface AnalysisStore {

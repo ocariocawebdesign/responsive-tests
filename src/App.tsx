@@ -54,6 +54,15 @@ function App() {
       apiService.pollAnalysisStatus(
         analysis_id,
         (status) => {
+          if (status.status === 'completed') {
+            console.log('[Feedback] Resultado da análise', {
+              analysisId: status.id,
+              screenshots: status.screenshots,
+              issues: status.issues,
+              recommendations: status.recommendations,
+              score: status.score
+            });
+          }
           updateAnalysisStatus(status);
         },
         (error) => {
@@ -286,12 +295,10 @@ function App() {
             {currentAnalysis.status === 'completed' && (
               <>
                 {/* Screenshots */}
-                {currentAnalysis.screenshots.length > 0 && (
-                  <Screenshots 
-                    screenshots={currentAnalysis.screenshots} 
-                    analysisId={currentAnalysis.id}
-                  />
-                )}
+                <Screenshots 
+                  screenshots={currentAnalysis.screenshots.filter((s) => Boolean(s.url))} 
+                  analysisId={currentAnalysis.id}
+                />
 
                 {/* Diagnosis */}
                 {currentAnalysis.issues.length > 0 && (
@@ -307,7 +314,11 @@ function App() {
                       timestamp: new Date().toISOString(),
                       summary: currentAnalysis.summary,
                       recommendations: currentAnalysis.recommendations,
-                      score: currentAnalysis.score
+                      screenshots: currentAnalysis.screenshots,
+                      guide: currentAnalysis.guide,
+                      score: currentAnalysis.score,
+                      technology: currentAnalysis.technology,
+                      seo: currentAnalysis.seo
                     }}
                   />
                 )}

@@ -13,6 +13,9 @@ class DeviceType(str, Enum):
     TABLET = "tablet"
     DESKTOP = "desktop"
     FOUR_K = "4k"
+    LARGE_DESKTOP = "large-desktop"
+    ALL = "all"
+    GUIDE = "guide"
 
 class AnalysisStatus(str, Enum):
     PENDING = "pending"
@@ -49,6 +52,8 @@ class ScreenshotData(BaseModel):
     resolution: str
     url: str
     full_page_url: Optional[str] = None
+    compliant: Optional[bool] = None
+    violations: List[Dict[str, Any]] = []
 
 class Issue(BaseModel):
     id: str
@@ -65,6 +70,7 @@ class Recommendation(BaseModel):
     category: RecommendationCategory
     title: str
     description: str
+    justification: Optional[str] = None
     code_example: Optional[str] = None
     before: Optional[str] = None
     after: Optional[str] = None
@@ -76,6 +82,22 @@ class Score(BaseModel):
     tablet: int = Field(ge=0, le=100)
     desktop: int = Field(ge=0, le=100)
     overall: int = Field(ge=0, le=100)
+
+class TechnologyInfo(BaseModel):
+    frameworks: List[str] = []
+    cms: Optional[str] = None
+    libraries: List[str] = []
+    languages: List[str] = []
+    server: Optional[str] = None
+
+class SeoMeta(BaseModel):
+    title: Optional[str] = None
+    description: Optional[str] = None
+    keywords: Optional[str] = None
+    robots: Optional[str] = None
+    canonical: Optional[str] = None
+    og: Dict[str, str] = {}
+    twitter: Dict[str, str] = {}
 
 class AnalysisStatus(BaseModel):
     id: str
@@ -92,6 +114,9 @@ class AnalysisStatus(BaseModel):
     error: Optional[str] = None
     current_step: Optional[int] = None
     total_steps: Optional[int] = None
+    technology: Optional[TechnologyInfo] = None
+    seo: Optional[SeoMeta] = None
+    guide: Optional[Dict[str, Any]] = None
 
     @classmethod
     def from_db_model(cls, db_model):
@@ -108,7 +133,9 @@ class AnalysisStatus(BaseModel):
             recommendations=db_model.recommendations or [],
             score=Score(**db_model.score) if db_model.score else Score(),
             summary=db_model.summary or "",
-            error=db_model.error
+            error=db_model.error,
+            technology=None,
+            seo=None
         )
 
 # Database Models (for reference)

@@ -7,6 +7,8 @@ interface ScreenshotData {
   resolution: string;
   url: string;
   fullPageUrl?: string;
+  compliant?: boolean;
+  violations?: Array<{ id: string; title: string; description: string; guide_ref?: string }>;
 }
 
 interface ScreenshotsProps {
@@ -17,19 +19,22 @@ interface ScreenshotsProps {
 const Screenshots: React.FC<ScreenshotsProps> = ({ screenshots, analysisId }) => {
   const [currentIndex, setCurrentIndex] = useState(0);
   const [isFullscreen, setIsFullscreen] = useState(false);
+  const apiBase = (import.meta as any).env?.VITE_API_URL || 'http://localhost:8000';
 
   const deviceIcons = {
     mobile: Smartphone,
     tablet: Tablet,
     desktop: Monitor,
-    '4k': Monitor
+    '4k': Monitor,
+    'large-desktop': Monitor
   };
 
   const deviceColors = {
     mobile: 'bg-green-100 text-green-800',
     tablet: 'bg-blue-100 text-blue-800',
     desktop: 'bg-purple-100 text-purple-800',
-    '4k': 'bg-indigo-100 text-indigo-800'
+    '4k': 'bg-indigo-100 text-indigo-800',
+    'large-desktop': 'bg-indigo-100 text-indigo-800'
   };
 
   if (!screenshots || screenshots.length === 0) {
@@ -44,8 +49,16 @@ const Screenshots: React.FC<ScreenshotsProps> = ({ screenshots, analysisId }) =>
   }
 
   const currentScreenshot = screenshots[currentIndex];
-  const IconComponent = deviceIcons[currentScreenshot.device as keyof typeof deviceIcons];
-  const colorClass = deviceColors[currentScreenshot.device as keyof typeof deviceColors];
+  const IconComponent = deviceIcons[currentScreenshot.device as keyof typeof deviceIcons] || Monitor;
+  const colorClass = deviceColors[currentScreenshot.device as keyof typeof deviceColors] || 'bg-gray-100 text-gray-800';
+  const compliancePill =
+    currentScreenshot.compliant === true
+      ? 'bg-green-100 text-green-800'
+      : currentScreenshot.compliant === false
+        ? 'bg-red-100 text-red-800'
+        : 'bg-yellow-100 text-yellow-800';
+  const complianceLabel =
+    currentScreenshot.compliant === true ? 'CONFORME' : currentScreenshot.compliant === false ? 'NÃO CONFORME' : 'INDEFINIDO';
 
   const nextScreenshot = () => {
     setCurrentIndex((prev) => (prev + 1) % screenshots.length);
@@ -57,7 +70,8 @@ const Screenshots: React.FC<ScreenshotsProps> = ({ screenshots, analysisId }) =>
 
   const downloadScreenshot = () => {
     const link = document.createElement('a');
-    link.href = currentScreenshot.fullPageUrl || currentScreenshot.url;
+    const rel = (currentScreenshot as any).full_page_url || currentScreenshot.fullPageUrl || currentScreenshot.url;
+    link.href = `${apiBase}${rel}`;
     link.download = `screenshot-${analysisId}-${currentScreenshot.device}.png`;
     document.body.appendChild(link);
     link.click();
@@ -83,6 +97,10 @@ const Screenshots: React.FC<ScreenshotsProps> = ({ screenshots, analysisId }) =>
           </div>
           
           <div className="flex items-center space-x-2">
+            <div className={`px-3 py-1 rounded-full text-xs font-medium ${compliancePill}`}>
+              {complianceLabel}
+              {currentScreenshot.violations?.length ? ` • ${currentScreenshot.violations.length}` : ''}
+            </div>
             <button
               onClick={downloadScreenshot}
               className="p-2 text-gray-500 hover:text-gray-700 hover:bg-gray-100 rounded-lg transition-colors"
@@ -114,7 +132,7 @@ const Screenshots: React.FC<ScreenshotsProps> = ({ screenshots, analysisId }) =>
 
           <div className={`relative ${isFullscreen ? 'max-w-7xl max-h-screen' : 'aspect-video max-h-96'}`}>
             <img
-              src={currentScreenshot.url}
+              src={`${apiBase}${currentScreenshot.url}`}
               alt={`Screenshot ${currentScreenshot.device} - ${currentScreenshot.resolution}`}
               className={`w-full h-full object-contain bg-gray-50 ${isFullscreen ? 'rounded-lg' : ''}`}
             />
@@ -173,6 +191,12 @@ const Screenshots: React.FC<ScreenshotsProps> = ({ screenshots, analysisId }) =>
             {screenshots.map((screenshot, index) => {
               const IconComp = deviceIcons[screenshot.device as keyof typeof deviceIcons];
               const colorCls = deviceColors[screenshot.device as keyof typeof deviceColors];
+              const dot =
+                screenshot.compliant === true
+                  ? 'bg-green-500'
+                  : screenshot.compliant === false
+                    ? 'bg-red-500'
+                    : 'bg-yellow-500';
               
               return (
                 <button
@@ -189,12 +213,20 @@ const Screenshots: React.FC<ScreenshotsProps> = ({ screenshots, analysisId }) =>
                       <IconComp className="h-4 w-4" />
                     </div>
                     <div className="text-left">
-                      <div className="text-xs font-medium text-gray-900 capitalize">
-                        {screenshot.device}
+                      <div className="flex items-center space-x-2">
+                        <div className="text-xs font-medium text-gray-900 capitalize">
+                          {screenshot.device}
+                        </div>
+                        <span className={`inline-block w-2 h-2 rounded-full ${dot}`} />
                       </div>
                       <div className="text-xs text-gray-500">
                         {screenshot.resolution}
                       </div>
+                      {screenshot.violations?.length ? (
+                        <div className="text-[11px] text-gray-500">
+                          {screenshot.violations.length} violação(ões)
+                        </div>
+                      ) : null}
                     </div>
                   </div>
                 </button>

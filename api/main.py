@@ -9,7 +9,7 @@ from typing import List, Optional, Dict, Any
 import asyncio
 import sys
 from pathlib import Path
-from dotenv import load_dotenv
+from dotenv import load_dotenv, find_dotenv
 
 from agent.responsive_agent import ResponsiveTestingAgent
 from database.database import DatabaseManager
@@ -19,6 +19,12 @@ from models.models import (
 )
 
 # Initialize FastAPI app
+if sys.platform.startswith("win"):
+    try:
+        asyncio.set_event_loop_policy(asyncio.WindowsProactorEventLoopPolicy())
+    except Exception:
+        pass
+
 app = FastAPI(
     title="Responsive Testing API",
     description="API para análise de responsividade de sites com IA",
@@ -26,7 +32,7 @@ app = FastAPI(
 )
 
 # Configure CORS
-load_dotenv()
+load_dotenv(find_dotenv())
 _cors_origins_env = os.getenv("CORS_ORIGINS", "http://localhost:3000,http://localhost:5173,http://localhost:5174,http://localhost:5175")
 _cors_origins = [o.strip() for o in _cors_origins_env.split(",") if o.strip()]
 app.add_middleware(
@@ -39,14 +45,16 @@ app.add_middleware(
 )
 
 # Create directories for screenshots and reports
-SCREENSHOTS_DIR = Path("screenshots")
-REPORTS_DIR = Path("reports")
+API_DIR = Path(__file__).resolve().parent
+PROJECT_ROOT = API_DIR.parent
+SCREENSHOTS_DIR = PROJECT_ROOT / "screenshots"
+REPORTS_DIR = PROJECT_ROOT / "reports"
 SCREENSHOTS_DIR.mkdir(exist_ok=True)
 REPORTS_DIR.mkdir(exist_ok=True)
 
 # Mount static files
-app.mount("/screenshots", StaticFiles(directory="screenshots"), name="screenshots")
-app.mount("/reports", StaticFiles(directory="reports"), name="reports")
+app.mount("/screenshots", StaticFiles(directory=str(SCREENSHOTS_DIR)), name="screenshots")
+app.mount("/reports", StaticFiles(directory=str(REPORTS_DIR)), name="reports")
 
 # Initialize services
 db_manager = DatabaseManager()
@@ -188,21 +196,139 @@ async def process_analysis(analysis_id: str, url: str):
     try:
         print(f"Starting analysis {analysis_id} for {url}")
         
+        # Load responsive guide (mandatory)
+        guide = agent.load_responsive_guide()
+
+        def _normalize_devices_from_guide(guide_obj: Optional[Dict[str, Any]]) -> List[Dict[str, Any]]:
+            bps = (guide_obj or {}).get("breakpoints")
+            if isinstance(bps, list) and len(bps) > 0:
+                return bps
+            return [
+                {"id": "mobile", "label": "Mobile", "width": 375, "height": 667},
+                {"id": "tablet", "label": "Tablet", "width": 768, "height": 1024},
+                {"id": "desktop", "label": "Desktop", "width": 1024, "height": 900},
+                {"id": "large-desktop", "label": "Large Desktop", "width": 1440, "height": 900},
+            ]
+
+        def _generate_placeholder_screenshots(
+            analysis_id: str,
+            devices: List[Dict[str, Any]],
+            reason: str
+        ) -> List[Dict[str, Any]]:
+            from PIL import Image, ImageDraw
+
+            screenshots: List[Dict[str, Any]] = []
+            timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+            reason_str = str(reason or "")
+            if len(reason_str) > 180:
+                reason_str = reason_str[:180] + "..."
+
+            for device in devices:
+                device_id = device.get("id") or device.get("name") or "breakpoint"
+                label = device.get("label") or str(device_id)
+                w = int(device.get("width") or 0) or 800
+                h = int(device.get("height") or 0) or 600
+                filename = f"{analysis_id}_{device_id}_{timestamp}.png"
+                full_page_filename = f"{analysis_id}_{device_id}_full_{timestamp}.png"
+
+                img = Image.new("RGB", (w, h), color=(245, 245, 245))
+                draw = ImageDraw.Draw(img)
+                draw.multiline_text(
+                    (20, 20),
+                    f"{label}\n{w}x{h}\n(placeholder)\n{reason_str}",
+                    fill=(60, 60, 60),
+                )
+                img.save(SCREENSHOTS_DIR / filename)
+                img.save(SCREENSHOTS_DIR / full_page_filename)
+
+                screenshots.append({
+                    "id": str(uuid.uuid4()),
+                    "device": str(device_id),
+                    "resolution": f"{w}x{h}",
+                    "url": f"/screenshots/{filename}",
+                    "full_page_url": f"/screenshots/{full_page_filename}",
+                    "compliant": False,
+                    "violations": [{
+                        "id": "screenshot_capture_failed",
+                        "title": "Falha ao capturar screenshot",
+                        "description": reason_str,
+                        "guide_ref": "responsive-guide.md §10.2"
+                    }]
+                })
+
+            return screenshots
+
         # Update status
         active_analyses[analysis_id].status = "analyzing"
         active_analyses[analysis_id].progress = 10
         active_analyses[analysis_id].message = "Capturando screenshots..."
+        active_analyses[analysis_id].guide = guide
         
         # Step 1: Capture screenshots
         screenshots: List[Dict[str, Any]] = []
         try:
-            screenshots = await agent.capture_screenshots(url, analysis_id)
+            screenshots = await agent.capture_screenshots(
+                url,
+                analysis_id,
+                breakpoints=guide.get("breakpoints"),
+                guide_rules=guide.get("rules"),
+            )
+            if not screenshots:
+                screenshots = _generate_placeholder_screenshots(
+                    analysis_id,
+                    _normalize_devices_from_guide(guide),
+                    "Captura retornou lista vazia."
+                )
+
+            expected = {bp.get("id") for bp in (guide.get("breakpoints") or []) if bp.get("id")}
+            got = {s.get("device") for s in (screenshots or []) if s.get("device")}
+            missing = sorted(list(expected - got))
+            if missing:
+                screenshots = screenshots or []
+                screenshots.append({
+                    "id": str(uuid.uuid4()),
+                    "device": "guide",
+                    "resolution": "",
+                    "url": "",
+                    "full_page_url": None,
+                    "compliant": False,
+                    "violations": [{
+                        "id": "breakpoints_missing",
+                        "title": "Breakpoints não capturados",
+                        "description": f"Não foi possível capturar screenshots para: {', '.join(missing)}.",
+                        "guide_ref": "responsive-guide.md §10.2"
+                    }]
+                })
             active_analyses[analysis_id].progress = 25
             active_analyses[analysis_id].message = "Analisando layout..."
         except Exception as e:
-            active_analyses[analysis_id].message = f"Falha ao capturar screenshots: {type(e).__name__}: {e}"
-            screenshots = []
-            active_analyses[analysis_id].progress = 20
+            reason = f"{type(e).__name__}: {e}"
+            active_analyses[analysis_id].message = f"Falha ao capturar screenshots: {reason}. Gerando placeholders..."
+            screenshots = _generate_placeholder_screenshots(
+                analysis_id,
+                _normalize_devices_from_guide(guide),
+                reason
+            )
+            active_analyses[analysis_id].progress = 25
+        
+
+        # Convert guide violations into issues
+        guide_issues: List[Dict[str, Any]] = []
+        for sc in screenshots or []:
+            device = sc.get("device", "all")
+            for v in sc.get("violations") or []:
+                vid = v.get("id", "")
+                issue_type = "critical" if vid.startswith("viewport_") else "warning"
+                severity = 5 if issue_type == "critical" else 3
+                guide_issues.append({
+                    "id": str(uuid.uuid4()),
+                    "type": issue_type,
+                    "severity": severity,
+                    "title": v.get("title", "Não conformidade"),
+                    "description": v.get("description", ""),
+                    "device": device if device else "all",
+                    "suggestion": f"Referência: {v.get('guide_ref', 'responsive-guide.md')}"
+                })
         
         # Step 2: Analyze layout
         layout_issues = await agent.analyze_layout(url, screenshots)
@@ -213,12 +339,16 @@ async def process_analysis(analysis_id: str, url: str):
         visual_issues = await agent.analyze_with_vision(screenshots)
         active_analyses[analysis_id].progress = 75
         active_analyses[analysis_id].message = "Gerando recomendações..."
+
+        # Detect technology and SEO
+        tech_seo = await agent.detect_technology(url)
         
         # Step 4: Generate recommendations and report
-        all_issues = layout_issues + visual_issues
+        all_issues = guide_issues + layout_issues + visual_issues
         recommendations = await agent.generate_suggestions(all_issues)
         report_data = await agent.create_report(
-            analysis_id, url, screenshots, all_issues, recommendations
+            analysis_id, url, screenshots, all_issues, recommendations,
+            technology=tech_seo.get('technology'), seo=tech_seo.get('seo'), guide=guide
         )
         
         # Calculate scores
@@ -233,6 +363,8 @@ async def process_analysis(analysis_id: str, url: str):
         active_analyses[analysis_id].recommendations = recommendations
         active_analyses[analysis_id].score = scores
         active_analyses[analysis_id].summary = report_data.get("summary", "")
+        active_analyses[analysis_id].technology = tech_seo.get('technology')
+        active_analyses[analysis_id].seo = tech_seo.get('seo')
         
         # Save to database
         await save_analysis_to_db(analysis_id, active_analyses[analysis_id])
@@ -248,13 +380,13 @@ async def process_analysis(analysis_id: str, url: str):
             active_analyses[analysis_id].message = f"Erro na análise: {type(e).__name__}: {e}"
             active_analyses[analysis_id].error = f"{type(e).__name__}: {e}"
 
-def calculate_scores(issues: List[Issue]) -> Dict[str, int]:
+def calculate_scores(issues: List[Dict[str, Any]]) -> Dict[str, int]:
     """Calculate responsive scores based on issues"""
     try:
         # Count issues by severity and device
-        critical_count = len([i for i in issues if i.type == "critical"])
-        warning_count = len([i for i in issues if i.type == "warning"])
-        info_count = len([i for i in issues if i.type == "info"])
+        critical_count = len([i for i in issues if i.get("type") == "critical"])
+        warning_count = len([i for i in issues if i.get("type") == "warning"])
+        info_count = len([i for i in issues if i.get("type") == "info"])
         
         # Calculate base score (start from 100)
         base_score = 100
@@ -264,9 +396,9 @@ def calculate_scores(issues: List[Issue]) -> Dict[str, int]:
         overall_score = max(0, base_score - score_deduction)
         
         # Calculate device-specific scores (simplified)
-        mobile_score = max(0, overall_score - len([i for i in issues if i.device == "mobile" and i.type == "critical"]) * 10)
-        tablet_score = max(0, overall_score - len([i for i in issues if i.device == "tablet" and i.type == "critical"]) * 10)
-        desktop_score = max(0, overall_score - len([i for i in issues if i.device == "desktop" and i.type == "critical"]) * 10)
+        mobile_score = max(0, overall_score - len([i for i in issues if i.get("device") == "mobile" and i.get("type") == "critical"]) * 10)
+        tablet_score = max(0, overall_score - len([i for i in issues if i.get("device") == "tablet" and i.get("type") == "critical"]) * 10)
+        desktop_score = max(0, overall_score - len([i for i in issues if i.get("device") == "desktop" and i.get("type") == "critical"]) * 10)
         
         return {
             "mobile": mobile_score,
